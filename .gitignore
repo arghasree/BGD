@@ -1,0 +1,8 @@
+models/AlexNet/*.pth
+models/MLP/*.pth
+camelyon17/
+MNIST/
+
+
+
+

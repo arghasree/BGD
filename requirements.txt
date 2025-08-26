@@ -1,0 +1,36 @@
+# Core PyTorch packages
+torch>=1.12.0
+torchvision>=0.13.0
+torchaudio>=0.12.0
+
+# Data processing and scientific computing
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+
+# Machine learning utilities
+scikit-learn>=1.0.0
+
+# Image processing
+Pillow>=8.0.0
+
+# Visualization
+matplotlib>=3.5.0
+# seaborn>=0.11.0  # Uncomment if needed
+
+# Data downloading and management
+kagglehub>=0.1.0
+
+# Standard library packages (usually included with Python)
+# argparse - built-in
+# os - built-in
+# time - built-in
+# copy - built-in
+# pickle - built-in
+# random - built-in
+# pathlib - built-in (Python 3.4+)
+# shutil - built-in
+
+# Optional: For better performance on some systems
+# numba>=0.56.0  # Uncomment if needed for JIT compilation
+# tqdm>=4.62.0   # Uncomment if you want progress bars
