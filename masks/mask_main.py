@@ -17,6 +17,8 @@ from torch import optim
 import os
 import time
 import argparse
+import wandb
+import numpy as np
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -29,6 +31,27 @@ def loss_fn(output_model, target, Mask, lambda_reg=0.01):
     # print(f"Model loss is {model_loss}, Regularization loss is {mask_loss}")
     return model_loss + lambda_reg * mask_loss # penalize deviations from 1, encourage masks to be close to 1
 
+
+def get_accuracies(loaders, model):
+    """Get accuracies for train, test, and incorrect loaders"""
+    accuracies = []
+    for loader in loaders:
+        y_true = []
+        y_hat = []
+        for img, label in loader:
+            img = img.to(device)
+            label = label.to(device)
+            output = model(img)
+            y_pred = torch.argmax(output, dim=1)
+            y_true.extend(label.cpu().numpy().tolist())
+            y_hat.extend(y_pred.cpu().numpy().tolist())
+        
+        y_true = np.array(y_true)
+        y_hat = np.array(y_hat)
+        acc = np.mean(y_true == y_hat)
+        accuracies.append(acc)
+    
+    return accuracies[0], accuracies[1], accuracies[2]  # train, test, incorrect
 
 
 def loader_performance(loaders, model, epoch):  # Always assumes you are passing test and incorrect loader in that order
@@ -123,27 +146,34 @@ def train(loaders, model, Mask, epochs, criterion, optimizer, args):
 
 def bar_plot(incorrect_loader, mask, mask_id, args):
     directory = args.directory
-    save=[0]*10
+    save={}
     for sample in incorrect_loader:
         image, label = sample[0], sample[1]
         y_pred_mask = mask(image)
         y_hat_mask = torch.argmax(y_pred_mask)
         acc = evaluate(label, y_hat_mask)
+        label=label.item()
         if acc==1.0:
-            save[label-1]+=1
+            if label in save.keys():
+                save[label]+=1
+            else:
+                save[label]=1
+            wandb.log({f"mask_{mask_id}/label_{label}": save[label]})
+
             
     # plot the histogram of the correctly predicted samples
-    plt.figure(figsize=(10, 6))
-    plt.bar(range(10), save)
-    plt.xlabel('Label')
-    plt.ylabel('Number of samples')
-    plt.title(f'Plot of correctly predicted samples by mask {mask_id}')
-    plt.xticks(range(10), ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'])
+    # plt.figure(figsize=(10, 6))
+    # plt.bar(range(10), save)
+    # plt.xlabel('Label')
+    # plt.ylabel('Number of samples')
+    # plt.title(f'Plot of correctly predicted samples by mask {mask_id}/class {mask_id}')
+    # plt.xticks(range(10), ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'])
     
-    if not os.path.exists(f'{directory}masks/plots/{args.model_type}/{args.dataset}/'):
-        os.makedirs(f'{directory}masks/plots/{args.model_type}/{args.dataset}/')
-    else:
-        plt.savefig(f'{directory}masks/plots/{args.model_type}/{args.dataset}/mask_{mask_id}_{args.mask_initial_type}_{args.lambda_reg}.png')
+    # plt.show()
+    # if not os.path.exists(f'{directory}masks/plots/{args.model_type}/{args.dataset}/'):
+    #     os.makedirs(f'{directory}masks/plots/{args.model_type}/{args.dataset}/')
+    # else:
+    #     plt.savefig(f'{directory}masks/plots/{args.model_type}/{args.dataset}/mask_{mask_id}_{args.mask_initial_type}_{args.lambda_reg}.png')
 
 
 def check_if_model_changed(original_model_params, model):
@@ -165,18 +195,51 @@ def rn_masks(loaders, model, model_directory, args):
     model.load_state_dict(torch.load(model_directory, map_location=torch.device(device)))
     # Store original model parameters to verify they don't change
     original_model_params = [p.clone().detach() for p in model.parameters()]
-
+    masks = []
     for mask_id in range(10):  # Reduced to 3 for testing
-        print(f'Mask {mask_id}')
         mask = Mask(model, random_seed=mask_id, initial_type=args.mask_initial_type)
         optimizer = torch.optim.SGD(mask.mask_parameters, lr=args.mask_lr)
+        masks.append(mask)
         
-        # Test on first few samples only for demonstration
-        for sample in incorrect_loader:
-            _,_,loss_, correct_prediction = train(loaders+[sample], 
-                model, 
-                mask, 
-                epochs=100, criterion=loss_fn, optimizer=optimizer, args=args)
+    # Track training progress
+    sample_count = 0
+    total_correct = {i: 0 for i in range(10)}
+    save_img_per_class = {}; save_img = False
+    
+    # Test on first few samples only for demonstration
+    for sample in incorrect_loader:
+        _, label = sample[0], sample[1]
+        
+        if save_img:
+            if label.item() not in save_img_per_class.keys():
+                # Prepare image for wandb logging
+                img = sample[0].squeeze().cpu().numpy()
+                img = (img - img.min()) / (img.max() - img.min())
+            
+                save_img_per_class[label.item()] = img
+                wandb.log({
+                    f"sample/label_{label.item()}": wandb.Image(img)
+                })
+        
+        mask = masks[label]
+        _,_,loss_, correct_prediction = train(loaders+[sample], 
+            model, 
+            mask, 
+            epochs=100, criterion=loss_fn, optimizer=optimizer, args=args)
+        
+        sample_count += 1
+        label=label.item()
+        if correct_prediction:
+            total_correct[label] += 1
+        wandb.log({f"mask_{label}/correct_prediction": total_correct[label]
+        })
+            
+        # Log sample-level metrics
+        # wandb.log({
+        #     "sample/sample_id": sample_count,
+        #     "sample/label": label.item(),
+        #     "sample/total_accuracy": total_correct
+        # })
                 
         # Verify model parameters haven't changed
         # check_if_model_changed(original_model_params, model)
@@ -184,14 +247,79 @@ def rn_masks(loaders, model, model_directory, args):
         # Check mask values to see if they're different
         # visualize_mask(mask.mask_parameters)
 
+    # Initialize average mask parameters
+    avg_mask_params = []
+    for param in masks[0].mask_parameters:
+        avg_mask_params.append(torch.zeros_like(param))
+    
+    for mask_id in range(10):
+        print(f'Mask {mask_id}/Class {mask_id}')
+        mask = masks[mask_id]
+      
         
+        # Update running average of mask parameters
+        for i, param in enumerate(mask.mask_parameters):
+            avg_mask_params[i] = (avg_mask_params[i] * mask_id + param) / (mask_id + 1)
+        
+        # Calculate mask statistics
+        mask_mean = np.mean([torch.mean(torch.sigmoid(p)).item() for p in mask.mask_parameters])
+        mask_std = np.mean([torch.std(torch.sigmoid(p)).item() for p in mask.mask_parameters])
+        
+        # Get accuracies
+        train_acc, test_acc, incorrect_acc = get_accuracies([train_loader, test_loader, incorrect_loader], mask)
+        # mask_accuracies.append({"train": train_acc, "test": test_acc, "incorrect": incorrect_acc})
+        
+        # Log mask metrics
+        wandb.log({
+            f"mask_/train_accuracy": train_acc,
+            f"mask_/test_accuracy": test_acc,
+            f"mask_/incorrect_accuracy": incorrect_acc,
+            f"mask_/mask_mean": mask_mean,
+            f"mask_/mask_std": mask_std
+        })
+        
+        wandb.log({
+            f"mask_{mask_id}/train_accuracy": train_acc,
+            f"mask_{mask_id}/test_accuracy": test_acc,
+            f"mask_{mask_id}/incorrect_accuracy": incorrect_acc,
+        })
         bar_plot(incorrect_loader, mask, mask_id, args)
-        loader_performance([train_loader, test_loader, incorrect_loader], mask, epoch=f'Mask {mask_id}')
         print('*'*100)
+        
+        mask_avg = Mask(model, random_seed=mask_id, initial_type=args.mask_initial_type)
+        mask_avg.mask_parameters = nn.ParameterList(nn.Parameter(p, requires_grad=True) for p in avg_mask_params)
+        
+        train_acc, test_acc, incorrect_acc = get_accuracies([train_loader, test_loader, incorrect_loader], mask_avg)
+        wandb.log({
+            f"avg_mask_/train_accuracy": train_acc,
+            f"avg_mask_/test_accuracy": test_acc,
+            f"avg_mask_/incorrect_accuracy": incorrect_acc,
+        })
+
+    wandb.finish()
+    
+    # save the average mask parameters
+    torch.save(avg_mask_params, f'{args.directory}masks/avg_mask_params.pth')
 
 
 
 def run(args):
+    # Initialize wandb
+    wandb.init(
+        project="mask-regularization",
+        name=f"{args.dataset}_{args.model_type}_lambda{args.lambda_reg}_{args.mask_initial_type}",
+        config={
+            "dataset": args.dataset,
+            "model_type": args.model_type,
+            "batch_size": args.batch_size,
+            "learning_rate": args.mask_lr,
+            "lambda_reg": args.lambda_reg,
+            "mask_initial_type": args.mask_initial_type,
+            "num_masks": 10,
+            "device": device
+        }
+    )
+    
     print('Device =', device)
     dataload = {
         'CIFAR10': data_loader_CIFAR10,
@@ -268,10 +396,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
 
-    print_params(args)
+    # print_params(args)
     run(args)
 
 
 # based on the activation of model and mask
 # start with a raandom out of 10 and then see 
-# one for each task 
+# one for each class 

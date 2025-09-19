@@ -2,6 +2,8 @@ models/AlexNet/*.pth
 models/MLP/*.pth
 camelyon17/
 MNIST/
+wandb/
+masks/plots/
 
 
 
